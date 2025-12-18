@@ -39,6 +39,21 @@ func New(httpClient *http.Client) *Client {
 	rc := retryablehttp.NewClient()
 	rc.Logger = log.New(io.Discard, "", 0) // Don't log requests at all.
 	rc.HTTPClient = httpClient
+	rc.RetryMax = 1 // one retry for auth refresh
+	rc.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			auth.RefreshCGRAuth(ctx)
+			return true, nil
+		}
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	}
+	rc.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, attempt int) {
+		if attempt > 0 {
+			req.Header.Del("Authorization")
+			_ = auth.DefaultAuthenticators.AddAuth(req.Context(), req)
+		}
+	}
+
 	return &Client{httpClient: rc.StandardClient()}
 }
 

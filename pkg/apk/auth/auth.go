@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -87,6 +89,55 @@ type CGRAuth struct{}
 
 var sometimes = rate.Sometimes{Interval: 10 * time.Minute}
 var tok string
+
+// RefreshCGRAuth extracts identity from HTTP_AUTH if needed, re-authenticates,
+// and resets the rate limiter so the next AddAuth call fetches a fresh token.
+func RefreshCGRAuth(ctx context.Context) {
+	host := "apk.cgr.dev"
+	if h := os.Getenv("APKO_APK_HOST"); h != "" {
+		host = h
+	}
+
+	// Extract identity from HTTP_AUTH JWT if not already set
+	identity := os.Getenv("APKO_IDENTITY")
+	if identity == "" {
+		identity = extractIdentityFromHTTPAuth()
+	}
+
+	if identity != "" {
+		cmd := exec.CommandContext(ctx, "chainctl", "auth", "login", "--audience", host, "--identity", identity)
+		cmd.Stderr = io.Discard
+		_ = cmd.Run() // best effort
+	}
+
+	sometimes = rate.Sometimes{Interval: 10 * time.Minute}
+	tok = ""
+}
+
+// extractIdentityFromHTTPAuth extracts identity from HTTP_AUTH JWT's sub claim.
+func extractIdentityFromHTTPAuth() string {
+	env := os.Getenv("HTTP_AUTH")
+	parts := strings.Split(env, ":")
+	if len(parts) != 4 || parts[0] != "basic" {
+		return ""
+	}
+	token := parts[3]
+	jwtParts := strings.Split(token, ".")
+	if len(jwtParts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(jwtParts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.Sub
+}
 
 func (c CGRAuth) AddAuth(ctx context.Context, req *http.Request) error {
 	log := clog.FromContext(ctx)
